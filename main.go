@@ -1,123 +1,87 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"urlShorten/controller"
+	"urlShorten/database"
 	"urlShorten/model"
 
 	"math/rand"
 
-	"errors"
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"gorm.io/driver/sqlite"
+	"github.com/labstack/echo/v4/middleware"
 	"gorm.io/gorm"
 )
 
-var urlMap = make(map[string]string)
 var mainDb *gorm.DB
-
-func main() {
-
-	rand.Seed(time.Now().UnixNano())
-	db, err := gorm.Open(sqlite.Open("url.db"), &gorm.Config{})
-	if err != nil {
-		panic("failed to connect database")
-	}
-	mainDb = db
-	// Migrate the schema
-	mainDb.AutoMigrate(&model.URL{})
-	r := echo.New()
-
-	r.POST("/shorten", shortenURL)
-
-	r.GET("/:shortURL", redirectURL)
-	r.GET("/all", allUrl)
-
-	r.Start(":8080")
-
-}
 
 type ResponseJson struct {
 	ShortURL string `json:"short_url"`
 }
 
-func allUrl(c echo.Context) error {
-	var allUrl []model.URL
-	tx := mainDb.Find(&allUrl)
-	if tx.Error != nil {
-		return c.String(http.StatusBadRequest, "Error Find All URl")
+func main() {
+
+	rand.Seed(time.Now().UnixNano())
+
+	mainDb = database.InitDatabase()
+
+	mainDb.AutoMigrate(&model.URL{})
+
+	r := echo.New()
+	r.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
+		LogStatus: true,
+		LogURI:    true,
+		LogMethod: true,
+		BeforeNextFunc: func(c echo.Context) {
+			c.Set("customValueFromContext", 42)
+		},
+		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
+			value, _ := c.Get("customValueFromContext").(int)
+			fmt.Printf("REQUEST: uri: %v, status: %v, custom-value: %v , METHOD:%v\n", v.URI, v.Status, value, v.Method)
+			return nil
+		},
+	}))
+	r.Use(middleware.CORS())
+	r.Use(middleware.Recover())
+
+	r.GET("/all-routes", func(c echo.Context) error {
+		time.Sleep(2 * time.Second)
+		return controller.AllRoutes(c)
+	})
+	r.GET("/all", func(c echo.Context) error {
+		time.Sleep(2 * time.Second)
+		return controller.GetAllUrl(c, mainDb)
+	})
+	r.POST("/shorten", func(c echo.Context) error {
+		time.Sleep(2 * time.Second)
+		return controller.ShortenURL(c, mainDb)
+	})
+
+	r.GET("/:shortURL", func(c echo.Context) error {
+		time.Sleep(2 * time.Second)
+		return controller.RedirectURL(c, mainDb)
+	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	// Start server
+	go func() {
+		if err := r.Start(":8080"); err != nil && err != http.ErrServerClosed {
+			r.Logger.Fatal("shutting down the server")
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown the server with a timeout of 10 seconds.
+	<-ctx.Done()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.Shutdown(ctx); err != nil {
+		r.Logger.Fatal(err)
 	}
-	return c.JSON(http.StatusNotFound, allUrl)
-
-}
-func checkIfShorten(longURL string) error {
-	var myUrl model.URL
-	fmt.Println(longURL)
-
-	tx := mainDb.Where("url_full = ?", longURL).Take(&myUrl)
-	fmt.Println(myUrl)
-
-	fmt.Println(tx.RowsAffected)
-	if tx.RowsAffected != 0 {
-		res := fmt.Sprintf("URL %v has been shorten", longURL)
-		return errors.New(res)
-
-	}
-	return nil
-}
-func shortenURL(c echo.Context) error {
-
-	longURL := c.FormValue("url")
-	haveFound := checkIfShorten(longURL)
-	if haveFound != nil {
-		return c.String(http.StatusBadRequest, haveFound.Error())
-	}
-
-	shortURL := generateShortURL()
-	myUrl := model.URL{UrlFull: longURL, UrlShort: shortURL}
-
-	tx := mainDb.Create(&myUrl)
-	if tx.Error != nil {
-		return c.String(http.StatusBadRequest, "Bad request")
-	}
-
-	return c.JSON(http.StatusOK, myUrl)
-
-}
-
-func redirectURL(c echo.Context) error {
-
-	shortURL := c.Param("shortURL")
-	var myUrl model.URL
-
-	tx := mainDb.Where("url_short = ?", shortURL).Find(&myUrl)
-	if tx.Error != nil {
-		return c.String(http.StatusBadRequest, "Bad Request")
-	}
-	if tx.RowsAffected == 0 {
-		res := fmt.Sprintf("URL short: http://localhost/%v is not found", shortURL)
-		return c.String(http.StatusNotFound, res)
-
-	}
-
-	return c.Redirect(http.StatusMovedPermanently, myUrl.UrlFull)
-
-}
-
-func generateShortURL() string {
-
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-	shortURL := make([]byte, 6)
-
-	for i := range shortURL {
-
-		shortURL[i] = charset[rand.Intn(len(charset))]
-
-	}
-
-	return string(shortURL)
-
 }
